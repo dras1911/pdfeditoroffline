@@ -15,7 +15,9 @@ from .crypto import encrypt_to_disk, decrypt_from_disk
 from .db import Document, AuditLog, get_session
 from .pdf_ops import (
     detect_blank_pages, apply_page_ops, compress_with_ghostscript, page_count,
-    merge_pdfs, images_to_pdf, pdf_to_images, ALLOWED_IMAGE_EXT,
+    safe_page_count, merge_pdfs, images_to_pdf, pdf_to_images, ALLOWED_IMAGE_EXT,
+    split_pdf, extract_pages, parse_page_ranges, redact_areas,
+    protect_pdf, unlock_pdf, is_encrypted,
 )
 
 router = APIRouter(prefix="/api")
@@ -39,7 +41,8 @@ def _load(doc_id: str, user: str, s: Session) -> tuple[Document, bytes]:
 def _save(doc: Document, data: bytes, s: Session):
     path = settings.storage_dir / doc.id
     doc.size_bytes = encrypt_to_disk(data, path)
-    doc.page_count = page_count(data)
+    doc.page_count = safe_page_count(data)
+    doc.is_encrypted = is_encrypted(data)
     s.add(doc)
 
 
@@ -67,7 +70,8 @@ async def upload(
     _save(doc, data, s)
     _audit(s, user, "upload", doc.id, f"persist={persist} size={len(data)}")
     s.commit()
-    return {"id": doc.id, "filename": doc.filename, "page_count": doc.page_count, "size_bytes": doc.size_bytes}
+    return {"id": doc.id, "filename": doc.filename, "page_count": doc.page_count,
+            "size_bytes": doc.size_bytes, "is_encrypted": doc.is_encrypted}
 
 
 # ---------- list / delete ----------
@@ -77,6 +81,7 @@ def list_docs(user: str = Depends(current_user), s: Session = Depends(get_sessio
     return [
         {"id": d.id, "filename": d.filename, "page_count": d.page_count,
          "size_bytes": d.size_bytes, "persist": d.persist,
+         "is_encrypted": d.is_encrypted,
          "created_at": d.created_at.isoformat()}
         for d in rows
     ]
@@ -271,3 +276,161 @@ def export_images(
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{base}_images.zip"'},
     )
+
+
+# ---------- Split ----------
+@router.post("/docs/{doc_id}/split")
+def split(
+    doc_id: str,
+    payload: dict = Body(...),
+    user: str = Depends(current_user),
+    s: Session = Depends(get_session),
+):
+    """
+    payload:
+      mode: 'single' | 'every' | 'ranges'
+      every: int (when mode='every')
+      ranges_spec: '1-3,5,7-9' (when mode='ranges'; each comma group → 1 PDF)
+      persist: bool
+    Returns list of new doc metas.
+    """
+    doc, data = _load(doc_id, user, s)
+    mode = payload.get("mode", "single")
+    try:
+        parts = split_pdf(
+            data,
+            mode=mode,
+            every=int(payload.get("every", 1)),
+            ranges_spec=payload.get("ranges_spec"),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    persist = bool(payload.get("persist", False))
+    base = doc.filename.rsplit(".", 1)[0]
+    out = []
+    for i, pdf_bytes in enumerate(parts, 1):
+        new = Document(
+            id=str(uuid.uuid4()),
+            owner=user,
+            filename=f"{base}_part{i:03d}.pdf",
+            persist=persist,
+        )
+        _save(new, pdf_bytes, s)
+        out.append({"id": new.id, "filename": new.filename,
+                    "page_count": new.page_count, "size_bytes": new.size_bytes})
+    _audit(s, user, "split", doc.id, f"mode={mode} parts={len(parts)}")
+    s.commit()
+    return {"parts": out}
+
+
+# ---------- Extract pages ----------
+@router.post("/docs/{doc_id}/extract")
+def extract(
+    doc_id: str,
+    payload: dict = Body(...),
+    user: str = Depends(current_user),
+    s: Session = Depends(get_session),
+):
+    """
+    payload:
+      pages: [int]  (0-based, optional)
+      ranges_spec: str  (1-based, e.g. '1-3,5')
+      persist: bool
+      filename: str  (optional)
+    Returns new doc meta.
+    """
+    doc, data = _load(doc_id, user, s)
+    pages = payload.get("pages")
+    spec = payload.get("ranges_spec")
+    try:
+        if spec:
+            pages = parse_page_ranges(spec, doc.page_count or 999999)
+        if not pages:
+            raise HTTPException(400, "no pages selected")
+        new_data = extract_pages(data, [int(p) for p in pages])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    persist = bool(payload.get("persist", False))
+    base = doc.filename.rsplit(".", 1)[0]
+    new = Document(
+        id=str(uuid.uuid4()),
+        owner=user,
+        filename=payload.get("filename") or f"{base}_extract.pdf",
+        persist=persist,
+    )
+    _save(new, new_data, s)
+    _audit(s, user, "extract", doc.id, f"pages={pages}")
+    s.commit()
+    return {"id": new.id, "filename": new.filename,
+            "page_count": new.page_count, "size_bytes": new.size_bytes}
+
+
+# ---------- Redact ----------
+@router.post("/docs/{doc_id}/redact")
+def redact(
+    doc_id: str,
+    payload: dict = Body(...),
+    user: str = Depends(current_user),
+    s: Session = Depends(get_session),
+):
+    """
+    payload:
+      areas: [{page: int (0-based), x: float, y: float, w: float, h: float}]
+        coords NORMALIZED 0..1 (origin top-left)
+    Modifies original document in place.
+    """
+    doc, data = _load(doc_id, user, s)
+    try:
+        new_data = redact_areas(data, payload.get("areas") or [])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _save(doc, new_data, s)
+    _audit(s, user, "redact", doc.id, f"n={len(payload.get('areas') or [])}")
+    s.commit()
+    return {"id": doc.id, "page_count": doc.page_count, "size_bytes": doc.size_bytes}
+
+
+# ---------- Protect (set password) ----------
+@router.post("/docs/{doc_id}/protect")
+def protect(
+    doc_id: str,
+    payload: dict = Body(...),
+    user: str = Depends(current_user),
+    s: Session = Depends(get_session),
+):
+    """payload: {password: str}"""
+    doc, data = _load(doc_id, user, s)
+    password = (payload.get("password") or "").strip()
+    if len(password) < 4:
+        raise HTTPException(400, "password too short (min 4 chars)")
+    try:
+        new_data = protect_pdf(data, password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _save(doc, new_data, s)
+    _audit(s, user, "protect", doc.id, "password set")
+    s.commit()
+    return {"id": doc.id, "is_encrypted": doc.is_encrypted, "size_bytes": doc.size_bytes}
+
+
+# ---------- Unlock (remove password) ----------
+@router.post("/docs/{doc_id}/unlock")
+def unlock(
+    doc_id: str,
+    payload: dict = Body(...),
+    user: str = Depends(current_user),
+    s: Session = Depends(get_session),
+):
+    """payload: {password: str}"""
+    doc, data = _load(doc_id, user, s)
+    try:
+        new_data = unlock_pdf(data, payload.get("password") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _save(doc, new_data, s)
+    _audit(s, user, "unlock", doc.id, "password removed")
+    s.commit()
+    return {"id": doc.id, "is_encrypted": doc.is_encrypted,
+            "page_count": doc.page_count, "size_bytes": doc.size_bytes}

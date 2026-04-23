@@ -256,3 +256,198 @@ def pdf_to_images(pdf_bytes: bytes, fmt: str = "png", dpi: int = 150) -> list[by
     finally:
         doc.close()
     return out
+
+
+# ---------- Split / Extract ----------
+
+def parse_page_ranges(spec: str, total_pages: int) -> list[int]:
+    """
+    Parse '1-3,5,7-9' (1-based) into sorted unique 0-based indices.
+    Raises ValueError on invalid syntax or out-of-range.
+    """
+    if not spec or not spec.strip():
+        raise ValueError("empty range spec")
+    result: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                start, end = int(a), int(b)
+            except ValueError:
+                raise ValueError(f"invalid range: {part}")
+            if start < 1 or end < 1 or start > end:
+                raise ValueError(f"invalid range: {part}")
+            for n in range(start, end + 1):
+                if n > total_pages:
+                    raise ValueError(f"page {n} out of range (total {total_pages})")
+                result.add(n - 1)
+        else:
+            try:
+                n = int(part)
+            except ValueError:
+                raise ValueError(f"invalid page: {part}")
+            if n < 1 or n > total_pages:
+                raise ValueError(f"page {n} out of range (total {total_pages})")
+            result.add(n - 1)
+    if not result:
+        raise ValueError("no pages selected")
+    return sorted(result)
+
+
+def extract_pages(pdf_bytes: bytes, indices: list[int]) -> bytes:
+    """Build new PDF with only the given 0-based page indices, in given order."""
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    n = len(reader.pages)
+    writer = PdfWriter()
+    for i in indices:
+        if i < 0 or i >= n:
+            raise ValueError(f"page index out of range: {i}")
+        writer.add_page(reader.pages[i])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def split_pdf(
+    pdf_bytes: bytes,
+    mode: str = "single",
+    every: int = 1,
+    ranges_spec: str | None = None,
+) -> list[bytes]:
+    """
+    mode:
+      'single'  → each page becomes a separate PDF
+      'every'   → group every N pages into one PDF
+      'ranges'  → ranges_spec like '1-3,5,7-9' → ONE PDF per comma group
+    Returns list of PDF bytes.
+    """
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    n = len(reader.pages)
+    if n == 0:
+        raise ValueError("PDF has no pages")
+
+    groups: list[list[int]] = []
+    if mode == "single":
+        groups = [[i] for i in range(n)]
+    elif mode == "every":
+        if every < 1:
+            raise ValueError("every must be >= 1")
+        for i in range(0, n, every):
+            groups.append(list(range(i, min(i + every, n))))
+    elif mode == "ranges":
+        if not ranges_spec:
+            raise ValueError("ranges_spec required for mode='ranges'")
+        for part in ranges_spec.split(","):
+            indices = parse_page_ranges(part, n)
+            groups.append(indices)
+    else:
+        raise ValueError(f"unknown mode: {mode}")
+
+    out: list[bytes] = []
+    for grp in groups:
+        writer = PdfWriter()
+        for i in grp:
+            writer.add_page(reader.pages[i])
+        buf = io.BytesIO()
+        writer.write(buf)
+        out.append(buf.getvalue())
+    return out
+
+
+# ---------- Redact ----------
+
+def redact_areas(pdf_bytes: bytes, areas: list[dict]) -> bytes:
+    """
+    Permanently remove content under rectangular areas, fill with black.
+    `areas`: list of dicts with NORMALIZED (0-1) coords:
+        {page: int (0-based), x: float, y: float, w: float, h: float}
+    Coordinates are fraction of page width/height, origin top-left.
+    """
+    if not areas:
+        raise ValueError("no areas")
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        # group by page
+        by_page: dict[int, list[dict]] = {}
+        for a in areas:
+            p = int(a["page"])
+            if p < 0 or p >= len(doc):
+                raise ValueError(f"page index out of range: {p}")
+            by_page.setdefault(p, []).append(a)
+
+        for p, items in by_page.items():
+            page = doc[p]
+            pw, ph = page.rect.width, page.rect.height
+            for a in items:
+                x = float(a["x"]) * pw
+                y = float(a["y"]) * ph
+                w = float(a["w"]) * pw
+                h = float(a["h"]) * ph
+                if w <= 0 or h <= 0:
+                    continue
+                rect = fitz.Rect(x, y, x + w, y + h)
+                page.add_redact_annot(rect, fill=(0, 0, 0))
+            page.apply_redactions()
+        out = io.BytesIO()
+        doc.save(out, garbage=4, deflate=True)
+        return out.getvalue()
+    finally:
+        doc.close()
+
+
+# ---------- Password protect / unlock ----------
+
+def protect_pdf(pdf_bytes: bytes, password: str) -> bytes:
+    """Encrypt PDF with AES-128. Same password for user + owner (simple model)."""
+    if not password:
+        raise ValueError("password required")
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    if reader.is_encrypted:
+        raise ValueError("PDF is already encrypted — unlock first")
+    writer = PdfWriter()
+    writer.append_pages_from_reader(reader)
+    writer.encrypt(user_password=password, owner_password=password, use_128bit=True)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def unlock_pdf(pdf_bytes: bytes, password: str) -> bytes:
+    """Remove password from PDF. Raises ValueError on wrong password."""
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    if not reader.is_encrypted:
+        return pdf_bytes  # nothing to do
+    try:
+        ok = reader.decrypt(password or "")
+    except Exception as e:
+        raise ValueError(f"decrypt failed: {e}")
+    # pypdf returns 0 on failure, 1 (user) or 2 (owner) on success
+    if not ok:
+        raise ValueError("wrong password")
+    writer = PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def is_encrypted(pdf_bytes: bytes) -> bool:
+    try:
+        return PdfReader(io.BytesIO(pdf_bytes)).is_encrypted
+    except Exception:
+        return False
+
+
+def safe_page_count(pdf_bytes: bytes) -> int:
+    """page_count that returns 0 for encrypted/broken PDFs instead of raising."""
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        if reader.is_encrypted:
+            return 0
+        return len(reader.pages)
+    except Exception:
+        return 0
