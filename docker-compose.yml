@@ -1,0 +1,25 @@
+services:
+  backend:
+    build: ./backend
+    env_file: ./backend/.env
+    volumes:
+      - pdftools_data:/var/lib/pdftools
+    restart: unless-stopped
+    networks: [internal]
+    # NO 'ports:' — only reachable via nginx, no internet egress needed
+
+  frontend:
+    build: ./frontend
+    depends_on: [backend]
+    ports:
+      - "443:80"   # put real TLS termination here (nginx tls or reverse proxy)
+    restart: unless-stopped
+    networks: [internal]
+
+volumes:
+  pdftools_data:
+
+networks:
+  internal:
+    driver: bridge
+    internal: false   # set true if backend also forbidden DNS; needs LDAP reachable

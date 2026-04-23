@@ -1,0 +1,24 @@
+services:
+  backend:
+    build: ./backend
+    environment:
+      PDFTOOLS_STORAGE_DIR: /data/sessions
+      PDFTOOLS_DB_PATH: /data/meta.db
+      PDFTOOLS_DEV_MODE: "true"
+      PDFTOOLS_CORS_ORIGINS: "http://localhost:5173,http://localhost:8080"
+      PDFTOOLS_PURGE_INTERVAL_MINUTES: "60"
+    volumes:
+      - pdftools_dev_data:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on: [backend]
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  pdftools_dev_data:

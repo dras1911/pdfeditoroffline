@@ -1,0 +1,23 @@
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; margin: 0; background: #f4f5f7; color: #1c1e21; }
+.app { max-width: 1200px; margin: 0 auto; padding: 1rem; }
+h1 { font-size: 1.4rem; }
+button { cursor: pointer; padding: .4rem .7rem; border: 1px solid #ccc; background: #fff; border-radius: 4px; }
+button:hover { background: #eef; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+.toolbar { display: flex; gap: .5rem; margin: 1rem 0; flex-wrap: wrap; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; }
+.page-card { background: #fff; border: 2px solid #ddd; border-radius: 6px; padding: .5rem; position: relative; user-select: none; }
+.page-card.blank { border-color: #e67e22; background: #fff5e6; }
+.page-card.selected { border-color: #2980b9; }
+.page-card .badge { position: absolute; top: 4px; right: 4px; background: #e67e22; color: #fff; font-size: .7rem; padding: 2px 6px; border-radius: 3px; }
+.page-card .num { font-size: .8rem; color: #555; text-align: center; margin-top: .3rem; }
+.page-card canvas { width: 100% !important; height: auto !important; }
+.login { max-width: 360px; margin: 4rem auto; background: #fff; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+.login input { width: 100%; padding: .5rem; margin: .3rem 0 1rem; border: 1px solid #ccc; border-radius: 4px; }
+.error { color: #c0392b; margin: .5rem 0; }
+.docs-list { background: #fff; padding: 1rem; border-radius: 6px; margin-bottom: 1rem; }
+.docs-list table { width: 100%; border-collapse: collapse; }
+.docs-list th, .docs-list td { text-align: left; padding: .4rem; border-bottom: 1px solid #eee; font-size: .9rem; }
+.dropzone { border: 2px dashed #aaa; border-radius: 6px; padding: 2rem; text-align: center; background: #fff; }
+.dropzone.drag { background: #eef; border-color: #2980b9; }

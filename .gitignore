@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+build/
+.vite/
+
+# Sekrety / klucze — NIGDY nie commitować
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.crt
+*.p12
+secrets/
+
+# Lokalne dane runtime (PDFy pacjentów, baza meta)
+.devdata/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+sessions/
+
+# Edytory / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logi
+*.log
+logs/
+
+# Tymczasowe
+*.tmp
+*.bak
+*.swp
